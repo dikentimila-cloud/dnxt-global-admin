@@ -66,7 +66,21 @@ export default function TenantsPage() {
 
   const updateModuleConfig = (moduleName: string, field: string, value: any) => {
     setModuleConfigs((prev) =>
-      prev.map((m) => m.moduleName === moduleName ? { ...m, [field]: value } : m)
+      prev.map((m) => {
+        if (m.moduleName !== moduleName) return m;
+        const updated = { ...m, [field]: value };
+        // Auto-calculate expiry days when date changes
+        if (field === 'expiryDate' && value) {
+          const diffMs = new Date(value).getTime() - Date.now();
+          updated.expiryDaysLeft = Math.max(0, Math.ceil(diffMs / 86400000));
+        }
+        // Auto-calculate date when days change
+        if (field === 'expiryDaysLeft' && value > 0) {
+          const future = new Date(Date.now() + value * 86400000);
+          updated.expiryDate = future.toISOString().split('T')[0];
+        }
+        return updated;
+      })
     );
   };
 
@@ -228,90 +242,103 @@ export default function TenantsPage() {
 
                   {/* License Configuration */}
                   <div>
-                    <h4 className="text-sm font-semibold text-blue-700 uppercase tracking-wide mb-3">License Configuration</h4>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-1 h-5 bg-blue-600 rounded-full" />
+                      <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wide">License Configuration</h4>
+                    </div>
                     <div className="space-y-2">
                       {allModules.map((mod) => {
                         const config = moduleConfigs.find((m) => m.moduleName === mod.name)!;
+                        const modulePlans = plans.filter((p: any) => p.moduleName === mod.name);
+                        const selectedPlan = config.planId ? plans.find((p: any) => p.planId === config.planId) : null;
+                        const features = selectedPlan ? JSON.parse(selectedPlan.features || '[]') : [];
+
                         return (
-                          <div key={mod.name} className="border border-slate-200 rounded-lg overflow-hidden">
-                            <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50">
-                              <div className="flex items-center gap-2">
-                                <div className={`w-2 h-2 rounded-full ${config.enabled ? 'bg-green-500' : 'bg-slate-300'}`} />
-                                <span className={`text-sm font-semibold ${config.enabled ? 'text-blue-700' : 'text-slate-600'}`}>
+                          <div key={mod.name} className={`border rounded-lg transition-all ${config.enabled ? 'border-blue-200 bg-blue-50/30' : 'border-slate-200'}`}>
+                            {/* Module header */}
+                            <div className="flex items-center justify-between px-4 py-2.5">
+                              <div className="flex items-center gap-2.5">
+                                <div className={`w-2.5 h-2.5 rounded-full ${config.enabled ? 'bg-green-500' : 'bg-slate-300'}`} />
+                                <span className={`text-[13px] font-bold tracking-wide ${config.enabled ? 'text-blue-700' : 'text-slate-500'}`}>
                                   {mod.name.toUpperCase()}
                                 </span>
-                                {!mod.available && <span className="text-[10px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Coming Soon</span>}
+                                {!mod.available && (
+                                  <span className="text-[10px] bg-slate-100 text-slate-400 px-2 py-0.5 rounded-full font-medium">Coming Soon</span>
+                                )}
                               </div>
-                              <button
-                                type="button"
+                              <button type="button"
                                 onClick={() => mod.available && toggleModuleEnabled(mod.name)}
                                 disabled={!mod.available}
-                                className={`text-xs font-medium px-3 py-1 rounded transition-colors ${
+                                className={`text-xs font-semibold px-3 py-1 rounded-md transition-all ${
                                   config.enabled
-                                    ? 'text-red-600 hover:bg-red-50'
+                                    ? 'text-red-600 bg-red-50 hover:bg-red-100'
                                     : mod.available
-                                      ? 'text-blue-600 hover:bg-blue-50'
+                                      ? 'text-blue-600 bg-blue-50 hover:bg-blue-100'
                                       : 'text-slate-400 cursor-not-allowed'
-                                }`}
-                              >
-                                {config.enabled ? 'CANCEL' : 'ACTIVATE'}
+                                }`}>
+                                {config.enabled ? 'DEACTIVATE' : 'ACTIVATE'}
                               </button>
                             </div>
+
+                            {/* Expanded config when activated */}
                             {config.enabled && (
-                              <div className="px-4 py-3 space-y-3">
-                                {/* Plan Selector */}
-                                <div>
-                                  <label className="block text-xs font-medium text-slate-500 mb-1">PLAN *</label>
-                                  <select value={config.planId}
-                                    onChange={(e) => updateModuleConfig(mod.name, 'planId', e.target.value)}
-                                    className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                    <option value="">Select plan...</option>
-                                    {plans.filter((p: any) => p.moduleName === mod.name).map((p: any) => (
-                                      <option key={p.planId} value={p.planId}>{p.planLabel} — {p.description}</option>
-                                    ))}
-                                  </select>
-                                  {config.planId && (() => {
-                                    const plan = plans.find((p: any) => p.planId === config.planId);
-                                    if (!plan) return null;
-                                    const features = JSON.parse(plan.features || '[]');
-                                    return (
-                                      <div className="mt-1.5 flex flex-wrap gap-1">
+                              <div className="px-4 pb-4 space-y-3 border-t border-blue-100">
+                                {/* Plan selector */}
+                                {modulePlans.length > 0 && (
+                                  <div className="pt-3">
+                                    <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Plan</label>
+                                    <div className="grid grid-cols-3 gap-2">
+                                      {modulePlans.map((p: any) => (
+                                        <button key={p.planId} type="button"
+                                          onClick={() => updateModuleConfig(mod.name, 'planId', p.planId)}
+                                          className={`text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                            config.planId === p.planId
+                                              ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500'
+                                              : 'border-slate-200 hover:border-slate-300'
+                                          }`}>
+                                          <div className="font-semibold text-slate-800">{p.planLabel}</div>
+                                          <div className="text-[10px] text-slate-500 mt-0.5 line-clamp-1">{p.description}</div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                    {features.length > 0 && (
+                                      <div className="mt-2 flex flex-wrap gap-1">
                                         {features.map((f: string) => (
-                                          <span key={f} className="inline-flex px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded text-[10px] font-medium">{f}</span>
+                                          <span key={f} className="inline-flex px-2 py-0.5 bg-white border border-blue-200 text-blue-700 rounded-full text-[10px] font-medium">{f}</span>
                                         ))}
                                       </div>
-                                    );
-                                  })()}
-                                </div>
-                                {/* License Config */}
-                                <div className="grid grid-cols-4 gap-3">
-                                <div>
-                                  <label className="block text-xs font-medium text-slate-500 mb-1">LICENSE TYPE *</label>
-                                  <select value={config.licenseType}
-                                    onChange={(e) => updateModuleConfig(mod.name, 'licenseType', e.target.value)}
-                                    className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                    <option value="Concurrent">Concurrent</option>
-                                    <option value="Named">Named</option>
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-medium text-slate-500 mb-1">LICENSE EXPIRY DATE *</label>
-                                  <input type="date" value={config.expiryDate}
-                                    onChange={(e) => updateModuleConfig(mod.name, 'expiryDate', e.target.value)}
-                                    className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-medium text-slate-500 mb-1">EXPIRY DAYS LEFT *</label>
-                                  <input type="number" min="1" value={config.expiryDaysLeft}
-                                    onChange={(e) => updateModuleConfig(mod.name, 'expiryDaysLeft', parseInt(e.target.value))}
-                                    className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-medium text-slate-500 mb-1">LICENSE PERMITS *</label>
-                                  <input type="number" min="1" value={config.licensePermits}
-                                    onChange={(e) => updateModuleConfig(mod.name, 'licensePermits', parseInt(e.target.value))}
-                                    className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                                </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* License fields */}
+                                <div className="grid grid-cols-4 gap-3 pt-2">
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Type</label>
+                                    <select value={config.licenseType}
+                                      onChange={(e) => updateModuleConfig(mod.name, 'licenseType', e.target.value)}
+                                      className="w-full px-2.5 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                      <option value="Concurrent">Concurrent</option>
+                                      <option value="Named">Named</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Expiry Date</label>
+                                    <input type="date" value={config.expiryDate}
+                                      onChange={(e) => updateModuleConfig(mod.name, 'expiryDate', e.target.value)}
+                                      className="w-full px-2.5 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Days Left</label>
+                                    <input type="number" min="0" value={config.expiryDaysLeft} readOnly
+                                      className="w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm bg-slate-50 text-slate-600 cursor-not-allowed" />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Permits</label>
+                                    <input type="number" min="1" value={config.licensePermits}
+                                      onChange={(e) => updateModuleConfig(mod.name, 'licensePermits', parseInt(e.target.value))}
+                                      className="w-full px-2.5 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+                                  </div>
                                 </div>
                               </div>
                             )}
