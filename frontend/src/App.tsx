@@ -10,6 +10,8 @@ import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
 import PlatformHealthPage from './pages/PlatformHealthPage';
 import ChangePasswordPage from './pages/ChangePasswordPage';
+import PlansPage from './pages/PlansPage';
+import AiConfigPage from './pages/AiConfigPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useStore((s) => s.token);
@@ -43,6 +45,8 @@ export default function App() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="audit" element={<AuditPage />} />
         <Route path="health" element={<PlatformHealthPage />} />
+        <Route path="ai-config" element={<AiConfigPage />} />
+        <Route path="plans" element={<PlansPage />} />
       </Route>
     </Routes>
   );

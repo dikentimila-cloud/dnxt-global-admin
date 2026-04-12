@@ -1,15 +1,17 @@
 import { NavLink } from 'react-router-dom';
 import { useStore } from '../../store/useStore';
 import {
-  LayoutDashboard, Building2, Users, Settings, Shield, Activity,
-  ChevronLeft, ChevronRight, Globe
+  LayoutDashboard, Building2, Users, Settings, Shield, Activity, Layers,
+  ChevronLeft, ChevronRight, Globe, Brain
 } from 'lucide-react';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', permission: 'DASHBOARD_VIEW' },
   { to: '/tenants', icon: Building2, label: 'Tenants', permission: 'TENANT_VIEW' },
+  { to: '/plans', icon: Layers, label: 'Plans', permission: 'CONFIG_VIEW' },
   { to: '/users', icon: Users, label: 'Admin Users', permission: 'USER_VIEW' },
   { to: '/health', icon: Activity, label: 'Platform Health', permission: 'DASHBOARD_VIEW' },
+  { to: '/ai-config', icon: Brain, label: 'AI Configuration', permission: 'CONFIG_EDIT' },
   { to: '/settings', icon: Settings, label: 'Settings', permission: 'CONFIG_VIEW' },
   { to: '/audit', icon: Shield, label: 'Audit Log', permission: 'AUDIT_VIEW' },
 ];

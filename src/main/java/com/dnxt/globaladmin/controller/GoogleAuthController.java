@@ -34,11 +34,27 @@ public class GoogleAuthController {
     private final ConcurrentHashMap<String, LoginResponse> pendingTokens = new ConcurrentHashMap<>();
 
     /**
+     * GET /api/auth/google/status — returns SSO configuration status.
+     * Public endpoint so the login page can adapt its UI.
+     */
+    @GetMapping("/status")
+    public ResponseEntity<ApiResponse> getSsoStatus() {
+        return ResponseEntity.ok(ApiResponse.ok(Map.of(
+                "ssoEnabled", googleAuthService.isSsoEnabled(),
+                "passwordFallback", googleAuthService.isPasswordFallbackEnabled(),
+                "provider", "google"
+        )));
+    }
+
+    /**
      * GET /api/auth/google/url — returns the Google OAuth2 authorization URL.
      * Frontend redirects the browser to this URL.
      */
     @GetMapping("/url")
     public ResponseEntity<ApiResponse> getAuthUrl() {
+        if (!googleAuthService.isSsoEnabled()) {
+            return ResponseEntity.badRequest().body(ApiResponse.error("SSO is not enabled"));
+        }
         String url = googleAuthService.getAuthorizationUrl();
         return ResponseEntity.ok(ApiResponse.ok(Map.of("url", url)));
     }

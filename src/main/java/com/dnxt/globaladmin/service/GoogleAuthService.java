@@ -17,7 +17,6 @@ import com.google.api.client.json.jackson2.JacksonFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,19 +26,14 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+/**
+ * Google Workspace SSO service.
+ * ALL configuration is read from platform_config (Settings page) — single source of truth.
+ */
 @Service
 public class GoogleAuthService {
 
     private static final Logger log = LoggerFactory.getLogger(GoogleAuthService.class);
-
-    @Value("${admin.google.client-id:}")
-    private String googleClientId;
-
-    @Value("${admin.google.client-secret:}")
-    private String googleClientSecret;
-
-    @Value("${admin.google.redirect-uri:}")
-    private String googleRedirectUri;
 
     @Autowired
     private AdminUserRepository userRepository;
@@ -56,42 +50,55 @@ public class GoogleAuthService {
     @Autowired
     private EmailDomainValidator emailDomainValidator;
 
-    /**
-     * Build the Google OAuth2 authorization URL.
-     * Frontend redirects the user's browser to this URL.
-     */
-    public String getAuthorizationUrl() {
-        return "https://accounts.google.com/o/oauth2/v2/auth"
-                + "?client_id=" + googleClientId
-                + "&redirect_uri=" + googleRedirectUri
-                + "&response_type=code"
-                + "&scope=openid%20email%20profile"
-                + "&access_type=offline"
-                + "&prompt=consent"
-                + "&hd=dnxtsolutions.com";  // Restrict to dnxtsolutions.com domain
+    @Autowired
+    private ConfigService configService;
+
+    // --- All config from platform_config DB table ---
+
+    private String cfg(String key) {
+        String val = configService.getConfigValue(key);
+        return val != null ? val.trim() : "";
     }
 
-    /**
-     * Exchange the authorization code for tokens, verify the ID token,
-     * find or create the admin user, and return a JWT login response.
-     */
+    public boolean isSsoEnabled() {
+        return "true".equalsIgnoreCase(cfg("sso.enabled"));
+    }
+
+    public boolean isPasswordFallbackEnabled() {
+        return "true".equalsIgnoreCase(cfg("sso.password_fallback"));
+    }
+
+    public String getAuthorizationUrl() {
+        String scopes = cfg("sso.google.scopes").replace(" ", "%20");
+        return "https://accounts.google.com/o/oauth2/v2/auth"
+                + "?client_id=" + cfg("sso.google.client_id")
+                + "&redirect_uri=" + cfg("sso.google.redirect_uri")
+                + "&response_type=code"
+                + "&scope=" + scopes
+                + "&access_type=offline"
+                + "&prompt=" + cfg("sso.google.prompt")
+                + "&hd=" + cfg("sso.google.hosted_domain");
+    }
+
     @Transactional
     public LoginResponse handleCallback(String authCode) throws Exception {
-        // Exchange auth code for tokens
+        String clientId = cfg("sso.google.client_id");
+        String clientSecret = cfg("sso.google.client_secret");
+        String redirectUri = cfg("sso.google.redirect_uri");
+
         GoogleTokenResponse tokenResponse = new GoogleAuthorizationCodeTokenRequest(
                 new NetHttpTransport(),
                 JacksonFactory.getDefaultInstance(),
                 "https://oauth2.googleapis.com/token",
-                googleClientId,
-                googleClientSecret,
+                clientId,
+                clientSecret,
                 authCode,
-                googleRedirectUri
+                redirectUri
         ).execute();
 
-        // Verify the ID token
         GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(
                 new NetHttpTransport(), JacksonFactory.getDefaultInstance())
-                .setAudience(Collections.singletonList(googleClientId))
+                .setAudience(Collections.singletonList(clientId))
                 .build();
 
         GoogleIdToken idToken = verifier.verify(tokenResponse.getIdToken());
@@ -107,46 +114,42 @@ public class GoogleAuthService {
         String avatarUrl = (String) payload.get("picture");
         Boolean emailVerified = payload.getEmailVerified();
 
-        // Gate 1: Email must be verified by Google
         if (!Boolean.TRUE.equals(emailVerified)) {
             throw new SecurityException("Google email is not verified");
         }
 
-        // Gate 2: Email domain check
         if (!emailDomainValidator.isEmailAllowed(email)) {
             log.warn("Google SSO rejected — unauthorized email domain: {}", email);
             throw new SecurityException("Unauthorized email domain. Only @dnxtsolutions.com addresses are allowed.");
         }
 
-        // Find existing user by email — invite-only, no auto-creation
         AdminUser user = userRepository.findByEmail(email).orElse(null);
 
         if (user == null) {
-            log.warn("Google SSO rejected — user not pre-registered: {}", email);
-            throw new SecurityException("Access denied. Your account has not been set up yet. Contact a Super Admin to get invited.");
+            if ("true".equalsIgnoreCase(cfg("sso.auto_create_users"))) {
+                user = createGoogleUser(email, googleId, firstName, lastName, avatarUrl);
+                log.info("Auto-created user via SSO: {}", email);
+            } else {
+                log.warn("Google SSO rejected — user not pre-registered: {}", email);
+                throw new SecurityException("Access denied. Your account has not been set up yet. Contact a Super Admin to get invited.");
+            }
         } else {
-            // Update Google fields if not set
             if (user.getGoogleId() == null) {
                 user.setGoogleId(googleId);
                 user.setAuthProvider("GOOGLE");
             }
-            if (avatarUrl != null) {
-                user.setAvatarUrl(avatarUrl);
-            }
+            if (avatarUrl != null) user.setAvatarUrl(avatarUrl);
             if (firstName != null) user.setFirstName(firstName);
             if (lastName != null) user.setLastName(lastName);
         }
 
-        // Gate 3: Account must be active
         if (!Boolean.TRUE.equals(user.getIsActive())) {
             throw new SecurityException("Account is disabled. Contact your administrator.");
         }
 
-        // Update last login
         user.setLastLogin(new Timestamp(System.currentTimeMillis()));
         userRepository.save(user);
 
-        // Load permissions and generate JWT
         List<String> permissionCodes = loadPermissionCodes(user.getRoleId());
         String token = tokenProvider.generateToken(user.getUserId(), user.getEmail());
 
@@ -166,13 +169,12 @@ public class GoogleAuthService {
                 user.getLastName(),
                 roleName,
                 permissionCodes,
-                false  // No password change needed for SSO users
+                false
         );
     }
 
     private AdminUser createGoogleUser(String email, String googleId,
                                         String firstName, String lastName, String avatarUrl) {
-        // Default role: VIEWER (safe default — Super Admin can upgrade)
         AdminRole viewerRole = roleRepository.findByRoleName("VIEWER")
                 .orElseThrow(() -> new IllegalStateException("VIEWER role not found"));
 
@@ -185,7 +187,7 @@ public class GoogleAuthService {
         user.setUserId(UUID.randomUUID().toString());
         user.setUsername(username);
         user.setEmail(email);
-        user.setPasswordHash(null);  // No local password for SSO users
+        user.setPasswordHash(null);
         user.setFirstName(firstName);
         user.setLastName(lastName);
         user.setRoleId(viewerRole.getRoleId());
