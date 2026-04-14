@@ -6,17 +6,23 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Provisions tenants in the Operations service.
- * Flow:
- * 1. Authenticate with Operations API (get JWT)
- * 2. Call POST /api/settings/tenants with tenant data
- * 3. Operations creates: tenant record, customer record, admin user, employee, welcome email
+ *
+ * Flow (internal API):
+ * 1. POST /api/internal/tenants/provision with X-Internal-Api-Key
+ * 2. Operations creates a dedicated ops_&lt;slug&gt; database, runs Flyway migrations,
+ *    seeds the tenant row + Super Administrator user, returns a temp password.
+ * 3. Global Admin emails the temp password to the primary contact.
+ *
+ * No user login dance. No shared admin credentials.
  */
 @Service
 public class OperationsProvisioningService {
@@ -26,11 +32,8 @@ public class OperationsProvisioningService {
     @Value("${admin.operations-service.url:http://localhost:8102}")
     private String operationsUrl;
 
-    @Value("${admin.operations-service.username:admin}")
-    private String opsUsername;
-
-    @Value("${admin.operations-service.password:admin123}")
-    private String opsPassword;
+    @Value("${admin.operations-service.internal-api-key:${OPS_INTERNAL_API_KEY:}}")
+    private String opsInternalApiKey;
 
     private final RestTemplate restTemplate = new RestTemplate();
 
@@ -42,95 +45,84 @@ public class OperationsProvisioningService {
         return provisionTenant(tenant, null);
     }
 
-    public Map<String, Object> provisionTenant(PlatformTenant tenant, java.util.List<String> enabledFeatures) {
+    public Map<String, Object> provisionTenant(PlatformTenant tenant, List<String> enabledFeatures) {
         Map<String, Object> result = new LinkedHashMap<>();
 
+        if (opsInternalApiKey == null || opsInternalApiKey.isBlank()) {
+            result.put("status", "failed");
+            result.put("error", "OPS_INTERNAL_API_KEY is not configured on Global Admin");
+            log.error("Cannot provision tenant '{}': internal API key missing", tenant.getTenantName());
+            return result;
+        }
+
+        Map<String, Object> payload = buildTenantPayload(tenant);
+        if (enabledFeatures != null) {
+            payload.put("enabledFeatures", enabledFeatures);
+        }
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Internal-Api-Key", opsInternalApiKey);
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
+
         try {
-            // Step 1: Authenticate with Operations
-            String opsToken = authenticateWithOperations();
-            if (opsToken == null) {
-                result.put("status", "failed");
-                result.put("error", "Failed to authenticate with Operations service");
-                return result;
-            }
-
-            // Step 2: Create tenant in Operations
-            Map<String, Object> tenantPayload = buildTenantPayload(tenant);
-            if (enabledFeatures != null) {
-                tenantPayload.put("enabledFeatures", enabledFeatures);
-            }
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(opsToken);
-
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(tenantPayload, headers);
-
             ResponseEntity<Map> response = restTemplate.exchange(
-                    operationsUrl + "/api/settings/tenants",
+                    operationsUrl + "/api/internal/tenants/provision",
                     HttpMethod.POST,
                     request,
                     Map.class
             );
 
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                Map body = response.getBody();
+            Map body = response.getBody();
+            if (response.getStatusCode().is2xxSuccessful() && body != null) {
                 Object data = body.get("data");
                 result.put("status", "provisioned");
                 result.put("operationsResult", data);
-                log.info("Successfully provisioned tenant '{}' in Operations", tenant.getTenantName());
+                log.info("Provisioned tenant '{}' in Operations (slug: {})",
+                        tenant.getTenantName(), tenant.getTenantSlug());
             } else {
                 result.put("status", "failed");
                 result.put("error", "Operations returned: " + response.getStatusCode());
-                log.warn("Operations provisioning failed for '{}': {}", tenant.getTenantName(), response.getStatusCode());
+                log.warn("Operations provisioning failed for '{}': {}",
+                        tenant.getTenantName(), response.getStatusCode());
             }
 
+        } catch (HttpStatusCodeException e) {
+            result.put("status", "failed");
+            result.put("error", extractErrorMessage(e));
+            log.error("Operations provisioning returned {} for '{}': {}",
+                    e.getStatusCode(), tenant.getTenantName(), e.getResponseBodyAsString());
         } catch (Exception e) {
             result.put("status", "failed");
             result.put("error", e.getMessage());
-            log.error("Failed to provision tenant '{}' in Operations: {}", tenant.getTenantName(), e.getMessage());
+            log.error("Failed to provision tenant '{}' in Operations", tenant.getTenantName(), e);
         }
 
         return result;
     }
 
+    private String extractErrorMessage(HttpStatusCodeException e) {
+        try {
+            Map<?, ?> body = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(e.getResponseBodyAsString(), Map.class);
+            Object msg = body.get("error");
+            if (msg == null) msg = body.get("message");
+            return msg != null ? String.valueOf(msg) : ("HTTP " + e.getStatusCode());
+        } catch (Exception ignored) {
+            return "HTTP " + e.getStatusCode() + ": " + e.getResponseBodyAsString();
+        }
+    }
+
     /**
-     * Deactivate a tenant in Operations.
+     * Deactivate a tenant in Operations. Currently a no-op placeholder —
+     * deactivation is tracked in Global Admin's platform_tenant table.
+     * A future enhancement will add an /api/internal/tenants/deactivate
+     * endpoint that marks ops_tenant.is_active=false in the tenant's DB.
      */
     public Map<String, Object> deactivateTenant(String tenantSlug) {
         Map<String, Object> result = new LinkedHashMap<>();
-
-        try {
-            String opsToken = authenticateWithOperations();
-            if (opsToken == null) {
-                result.put("status", "failed");
-                result.put("error", "Failed to authenticate with Operations service");
-                return result;
-            }
-
-            // Find tenant by slug, then deactivate
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(opsToken);
-
-            // Get all tenants to find the one matching our slug
-            ResponseEntity<Map> listResponse = restTemplate.exchange(
-                    operationsUrl + "/api/settings/tenants",
-                    HttpMethod.GET,
-                    new HttpEntity<>(headers),
-                    Map.class
-            );
-
-            if (listResponse.getStatusCode().is2xxSuccessful() && listResponse.getBody() != null) {
-                result.put("status", "deactivation_requested");
-                log.info("Tenant deactivation requested in Operations for slug: {}", tenantSlug);
-            }
-
-        } catch (Exception e) {
-            result.put("status", "failed");
-            result.put("error", e.getMessage());
-            log.error("Failed to deactivate tenant in Operations: {}", e.getMessage());
-        }
-
+        result.put("status", "deactivation_recorded");
+        log.info("Tenant deactivation recorded for slug: {} (Operations DB left intact)", tenantSlug);
         return result;
     }
 
@@ -145,42 +137,6 @@ public class OperationsProvisioningService {
         } catch (Exception e) {
             log.warn("Operations service not reachable: {}", e.getMessage());
             return false;
-        }
-    }
-
-    private String authenticateWithOperations() {
-        try {
-            Map<String, String> loginPayload = Map.of(
-                    "username", opsUsername,
-                    "password", opsPassword
-            );
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            HttpEntity<Map<String, String>> request = new HttpEntity<>(loginPayload, headers);
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    operationsUrl + "/api/auth/login",
-                    HttpMethod.POST,
-                    request,
-                    Map.class
-            );
-
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                Map body = response.getBody();
-                Map data = (Map) body.get("data");
-                if (data != null) {
-                    return (String) data.get("token");
-                }
-            }
-
-            log.warn("Operations login failed: {}", response.getStatusCode());
-            return null;
-
-        } catch (Exception e) {
-            log.error("Failed to authenticate with Operations: {}", e.getMessage());
-            return null;
         }
     }
 
